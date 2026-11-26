@@ -98,8 +98,9 @@ type Row struct {
 	Version uint32
 	Used    int
 	Wrapped bool
-	// Written is when the line was last written, in unix seconds, or 0 when
-	// stamping is off (see SetClock) or nothing was written to it. Rewriting or
-	// erasing the line moves it forward.
+	// Written is when the line's content first appeared, in unix seconds, or 0
+	// when stamping is off (see SetClock) or nothing was written to it. A line
+	// keeps its time through rewrites, erases and resizes: nothing but the
+	// first write that put content on it moves it.
 	Written int64
 }

@@ -137,6 +137,48 @@ func (t *Terminal) LogicalLineRange(row, from, to int) (first, last int, ok bool
 	return first, last, true
 }
 
+// LogicalLineNumbers fills numbers and heads for every view row: numbers[row]
+// is the 1-based number of the row's logical line among every line the main
+// buffer has produced, counting a soft-wrapped run as one line, and heads[row]
+// says whether the row begins that line. A continuation row carries its line's
+// number and shows nothing of its own, so rewrapping a line into more or fewer
+// rows moves no number: the rows around it keep what they had. Numbers count
+// past dropped history the way LineNumber does. It returns the slices, grown
+// to the row count. On the alternate screen, where the numbers are not
+// meaningful, every row is numbered as LineNumber numbers it.
+func (t *Terminal) LogicalLineNumbers(numbers []uint64, heads []bool) ([]uint64, []bool) {
+	if len(numbers) < t.rows {
+		numbers = make([]uint64, t.rows)
+	}
+	if len(heads) < t.rows {
+		heads = make([]bool, t.rows)
+	}
+	numbers, heads = numbers[:t.rows], heads[:t.rows]
+	if t.onAlt {
+		for row := range numbers {
+			numbers[row], heads[row] = t.LineNumber(row), true
+		}
+		return numbers, heads
+	}
+	// count is the number the next line beginning receives: every logical line
+	// the buffer dropped, and every one retained before the index being read.
+	// Retained index 0 continues the last dropped line exactly when it was
+	// wrapped; index i continues index i-1 exactly when that was wrapped.
+	count := t.scrolled - uint64(t.histCount) - t.droppedContinuations
+	top := t.histCount - t.view
+	last := top + t.rows - 1
+	for i := 0; i <= last; i++ {
+		head := i == 0 && !t.droppedWrapped || i > 0 && !t.bufferLine(i-1).wrapped
+		if head {
+			count++
+		}
+		if row := i - top; row >= 0 {
+			numbers[row], heads[row] = count, head
+		}
+	}
+	return numbers, heads
+}
+
 // RetainedRow returns a read-only row in the retained buffer.
 func (t *Terminal) RetainedRow(index int) (Row, bool) {
 	if t == nil || index < 0 || index >= t.bufferLineCount() {

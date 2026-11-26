@@ -157,12 +157,21 @@ type Terminal struct {
 	histBytes  int
 	histMax    int
 	histBudget int
-	histSpare  *line        // an evicted line to reuse, so a budget-bound history does not allocate per line
-	view       int          // how many lines the view is scrolled back
-	scrolled   uint64       // lines ever pushed into history, kept or dropped
-	clock      func() int64 // stamps lines when they are written; nil records nothing
-	clockAt    int64        // clock() for the current Write, see clockNow
-	clockValid bool
+	histSpare  *line  // an evicted line to reuse, so a budget-bound history does not allocate per line
+	view       int    // how many lines the view is scrolled back
+	scrolled   uint64 // lines ever pushed into history, kept or dropped
+	// droppedContinuations counts the soft-wrap continuations among the lines
+	// the buffer has dropped, and droppedWrapped remembers whether that last
+	// dropped line continues into the oldest line the buffer now holds. Drops
+	// leave from the oldest end one line at a time, so that last dropped line
+	// is always the predecessor of the oldest retained one; with the two, the
+	// logical line numbers the gutter shows keep counting as if nothing had
+	// been dropped. See LogicalLineNumbers.
+	droppedContinuations uint64
+	droppedWrapped       bool
+	clock                func() int64 // stamps lines when they are written; nil records nothing
+	clockAt              int64        // clock() for the current Write, see clockNow
+	clockValid           bool
 
 	cx, cy   int
 	pend     bool // a character was written in the last column; wrap on the next
@@ -512,6 +521,12 @@ func (t *Terminal) dropOldest() {
 	if t.histCount == 0 {
 		t.histHead = 0
 	}
+	// l is a continuation when the line dropped before it was wrapped into it,
+	// and it continues into the oldest line retained now when it was wrapped.
+	if t.droppedWrapped {
+		t.droppedContinuations++
+	}
+	t.droppedWrapped = l.wrapped
 }
 
 // trimHistory keeps the ring within its byte budget. The line limit alone
@@ -799,6 +814,15 @@ func (t *Terminal) clearHistory() {
 			t.images.dropLine(t.histAt(i).id)
 		}
 	}
+	// The cleared lines leave from the oldest end in order, like dropOldest's
+	// do, so the logical line numbers keep counting past them the same way.
+	for i := 0; i < t.histCount; i++ {
+		l := t.histAt(i)
+		if t.droppedWrapped {
+			t.droppedContinuations++
+		}
+		t.droppedWrapped = l.wrapped
+	}
 	clear(t.hist)
 	t.hist, t.histHead, t.histCount, t.histBytes, t.view = nil, 0, 0, 0, 0
 }
@@ -1010,12 +1034,9 @@ func (t *Terminal) eraseRange(l *line, a, b int) {
 	t.repairWide(l, a-1)
 	t.repairWide(l, b)
 	l.version++
-	// Erasing is a write too: the line's current (blank) content was produced
-	// now, so it must not keep the time of what it used to hold. A line nothing
-	// has ever been written to stays unstamped.
-	if t.clock != nil && (l.at != 0 || l.used != 0) {
-		l.at = t.clockNow()
-	}
+	// Erasing does not move the line's time: an erase and the rewrite that
+	// follows it are not new output, so the gutter keeps showing when the
+	// line's content appeared. A line nothing has ever written stays unstamped.
 }
 
 // repairWide blanks the orphan half of a double-width character at x.
@@ -1193,9 +1214,10 @@ func (t *Terminal) AppendRetainedText(dst []byte) []byte {
 
 // SetClock makes the terminal remember when each line is written: now returns
 // unix seconds and is called at most once per Write, not per line or character.
-// A line that is written over takes the time of that write, so a program that
-// repaints the screen in place moves its rows' times forward instead of leaving
-// them at the time each row first appeared. A nil clock stops recording and
+// A line takes the time of the write that first put content on it and keeps it
+// afterwards: a program that repaints a row in place, erases it or redraws it
+// after a resize is not new output, so the gutter keeps showing when the line
+// appeared instead of when it was last touched. A nil clock stops recording and
 // costs one nil check per printed run. Lines keep their time when they scroll
 // into the history.
 func (t *Terminal) SetClock(now func() int64) {
@@ -1232,12 +1254,12 @@ func (t *Terminal) clockNow() int64 {
 	return t.clockAt
 }
 
-// stamp records when the content of l was written. Overwriting a line moves its
-// time forward: a full-screen program on the main screen writes its rows again
-// every refresh, and the gutter must not report the time a row first appeared
-// for content that has since been replaced.
+// stamp records when the content of l first appeared. Only the first write to
+// a line stamps it: a rewrite is not new output, so a program that repaints a
+// row in place (top, a progress bar) or a shell that redraws its prompt after
+// a resize leaves the line at the time its content arrived.
 func (t *Terminal) stamp(l *line) {
-	if t.clock != nil {
+	if t.clock != nil && l.at == 0 {
 		l.at = t.clockNow()
 	}
 }

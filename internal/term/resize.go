@@ -210,14 +210,19 @@ func (t *Terminal) clearStalePrompt() {
 	}
 	rows := len(t.promptSaved)
 	t.promptStale = false
-	t.dropPromptRows()
 	last := min(row+rows-1, len(t.main.lines)-1)
 	for y := row; y <= last; y++ {
 		if t.images != nil {
 			t.images.dropLine(t.main.lines[y].id)
 		}
 		t.main.lines[y] = t.recycle(t.main.lines[y])
+		// The shell's redraw replaces the display copy with the prompt row it
+		// stands for, which is not new output: the row keeps the time of the
+		// saved row it replaces, so the gutter keeps showing when the prompt
+		// appeared rather than when the resize was drawn.
+		t.main.lines[y].at = t.promptSaved[y-row].at
 	}
+	t.dropPromptRows()
 }
 
 // capturePromptRows keeps the rows from the prompt at row as the shell drew
@@ -270,6 +275,10 @@ func (t *Terminal) paintPromptLine(dst, src *line) {
 		dst.hyperlinks = &links
 	}
 	dst.wrapped = src.wrapped
+	// The copy holds the prompt the saved row drew, so it carries the saved
+	// row's time: a resize is not new output, and the gutter must not show the
+	// moment of the resize as the moment the prompt appeared.
+	dst.at = src.at
 }
 
 // dropPromptRows releases the saved prompt rows.
@@ -418,6 +427,14 @@ func (t *Terminal) refillHistory(lines []*line) {
 			for _, l := range lines[:drop] {
 				t.images.dropLine(l.id)
 			}
+		}
+		// A reflow can leave more rows than the history holds; the rows it
+		// drops leave from the oldest end in order, like dropOldest's do.
+		for _, l := range lines[:drop] {
+			if t.droppedWrapped {
+				t.droppedContinuations++
+			}
+			t.droppedWrapped = l.wrapped
 		}
 		lines = lines[drop:]
 	}
